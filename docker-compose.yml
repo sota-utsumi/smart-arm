@@ -1,11 +1,13 @@
 services:
   arm:
     build: .
-    image: smart-arm:dev
     working_dir: /app
     environment:
-      - YOLO_CONFIG_DIR=/app/.config/Ultralytics
+      YOLO_CONFIG_DIR: /app/.config/Ultralytics
     volumes:
       - ./:/app
-      - yolo_weights:/app/.cache/ultralytics   # モデルDLキャッシュ（全員同じ挙動）
+      - yolo_weights:/app/.cache/ultralytics
     command: ["python", "/app/dockertest/Arm.py"]
+
+volumes:
+  yolo_weights: {}
