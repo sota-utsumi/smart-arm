@@ -25,7 +25,6 @@ namespace fs = std::filesystem;
 namespace {
 
 const fs::path kBaseDir = fs::current_path();
-const fs::path kTrainDir = kBaseDir / "images" / "train";
 const fs::path kSourceDir = kBaseDir / "images" / "source";
 const fs::path kOutputDir = kBaseDir / "output";
 const fs::path kModelDir = kBaseDir / "model";
@@ -71,46 +70,6 @@ struct CsvRow {
 
 class WeedClassifier {
 public:
-    void train(const std::vector<cv::Mat>& samples, const std::vector<int>& labels) {
-        if (samples.empty() || labels.empty() || samples.size() != labels.size()) {
-            throw std::runtime_error("training data is empty or inconsistent");
-        }
-
-        cv::Mat trainingData(static_cast<int>(samples.size()), samples[0].cols, CV_32F);
-        cv::Mat labelData(static_cast<int>(labels.size()), 1, CV_32S);
-
-        for (int i = 0; i < trainingData.rows; ++i) {
-            samples[i].copyTo(trainingData.row(i));
-            labelData.at<int>(i, 0) = labels[static_cast<size_t>(i)];
-        }
-
-        computeScaler(trainingData);
-        cv::Mat normalized = normalize(trainingData);
-
-        svm_ = cv::ml::SVM::create();
-        svm_->setType(cv::ml::SVM::C_SVC);
-        svm_->setKernel(cv::ml::SVM::RBF);
-        svm_->setC(10.0);
-        svm_->setGamma(1.0 / normalized.cols);
-        svm_->setTermCriteria(cv::TermCriteria(cv::TermCriteria::MAX_ITER, 1000, 1e-6));
-        svm_->train(normalized, cv::ml::ROW_SAMPLE, labelData);
-    }
-
-    void save(const fs::path& modelPath, const fs::path& scalerPath) const {
-        if (svm_.empty()) {
-            throw std::runtime_error("classifier is not trained");
-        }
-
-        svm_->save(modelPath.string());
-
-        cv::FileStorage fsStorage(scalerPath.string(), cv::FileStorage::WRITE);
-        if (!fsStorage.isOpened()) {
-            throw std::runtime_error("failed to open scaler file for writing");
-        }
-        fsStorage << "feature_mean" << featureMean_;
-        fsStorage << "feature_std" << featureStd_;
-    }
-
     void load(const fs::path& modelPath, const fs::path& scalerPath) {
         if (!fs::exists(modelPath)) {
             throw std::runtime_error("model file not found: " + modelPath.string());
@@ -155,27 +114,6 @@ public:
     }
 
 private:
-    void computeScaler(const cv::Mat& samples) {
-        cv::reduce(samples, featureMean_, 0, cv::REDUCE_AVG, CV_32F);
-
-        cv::Mat repeatedMean;
-        cv::repeat(featureMean_, samples.rows, 1, repeatedMean);
-        cv::Mat centered;
-        cv::subtract(samples, repeatedMean, centered);
-
-        cv::Mat squared;
-        cv::multiply(centered, centered, squared);
-        cv::reduce(squared, featureStd_, 0, cv::REDUCE_AVG, CV_32F);
-        cv::sqrt(featureStd_, featureStd_);
-
-        for (int col = 0; col < featureStd_.cols; ++col) {
-            float& value = featureStd_.at<float>(0, col);
-            if (value < 1e-6f) {
-                value = 1.0f;
-            }
-        }
-    }
-
     cv::Mat normalize(const cv::Mat& samples) const {
         cv::Mat repeatedMean;
         cv::repeat(featureMean_, samples.rows, 1, repeatedMean);
@@ -464,55 +402,6 @@ void writeDetectionCsv(const fs::path& csvPath, const std::vector<CsvRow>& rows)
     }
 }
 
-void trainModel() {
-    std::cout << "============================================================\n";
-    std::cout << "Training C++ model\n";
-    std::cout << "============================================================\n";
-
-    const auto weedImages = getImagePaths(kTrainDir / "weed");
-    const auto notWeedImages = getImagePaths(kTrainDir / "not_weed");
-
-    std::cout << "Weed images: " << weedImages.size() << " (" << (kTrainDir / "weed") << ")\n";
-    std::cout << "Not-weed images: " << notWeedImages.size() << " (" << (kTrainDir / "not_weed") << ")\n";
-
-    if (weedImages.empty() || notWeedImages.empty()) {
-        throw std::runtime_error("training images are missing");
-    }
-
-    std::vector<cv::Mat> samples;
-    std::vector<int> labels;
-
-    for (const auto& path : weedImages) {
-        const cv::Mat image = cv::imread(path.string());
-        if (!image.empty()) {
-            samples.push_back(extractFeatures(image));
-            labels.push_back(1);
-        }
-    }
-
-    for (const auto& path : notWeedImages) {
-        const cv::Mat image = cv::imread(path.string());
-        if (!image.empty()) {
-            samples.push_back(extractFeatures(image));
-            labels.push_back(0);
-        }
-    }
-
-    if (samples.empty()) {
-        throw std::runtime_error("no readable training images found");
-    }
-
-    WeedClassifier classifier;
-    classifier.train(samples, labels);
-
-    fs::create_directories(kModelDir);
-    classifier.save(kModelPath, kScalerPath);
-
-    std::cout << "Saved model to: " << kModelPath << "\n";
-    std::cout << "Saved scaler to: " << kScalerPath << "\n";
-    std::cout << "============================================================\n";
-}
-
 void processSourceImages() {
     std::cout << "============================================================\n";
     std::cout << "Processing source images with C++ detector\n";
@@ -630,18 +519,14 @@ void processCameraStream(const fs::path& configPath) {
 }
 
 struct Options {
-    bool train = false;
     bool detect = false;
-    bool all = false;
     bool cameraDetect = false;
     std::optional<fs::path> configPath;
 };
 
 void printUsage(const char* programName) {
     std::cout << "Usage:\n";
-    std::cout << "  " << programName << " --train\n";
     std::cout << "  " << programName << " --detect\n";
-    std::cout << "  " << programName << " --all\n";
     std::cout << "  " << programName << " --camera-detect --config config.txt\n";
 }
 
@@ -650,12 +535,8 @@ Options parseArgs(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--train") {
-            options.train = true;
-        } else if (arg == "--detect") {
+        if (arg == "--detect") {
             options.detect = true;
-        } else if (arg == "--all") {
-            options.all = true;
         } else if (arg == "--camera-detect") {
             options.cameraDetect = true;
         } else if (arg == "--config") {
@@ -680,16 +561,12 @@ int main(int argc, char** argv) {
     try {
         const Options options = parseArgs(argc, argv);
 
-        if (!options.train && !options.detect && !options.all && !options.cameraDetect) {
+        if (!options.detect && !options.cameraDetect) {
             printUsage(argv[0]);
             return 0;
         }
 
-        if (options.train || options.all) {
-            trainModel();
-        }
-
-        if (options.detect || options.all) {
+        if (options.detect) {
             processSourceImages();
         }
 

@@ -1,20 +1,30 @@
-# 雑草検出スクリプト (Weed Detector)
+# 雑草検出ツール (Weed Detector)
 
-MediaPipe Model Maker を使った雑草検出・サイズ計測ツールです。
+OpenCV ベースの雑草分類・領域検出ツールです。
+
+- `learn.py` が学習を担当します
+- `weed_detector.py` と `weed_detector.cpp` は推論専用です
+- Python と C++ は同じ OpenCV SVM モデルを共有します
 
 ## ディレクトリ構成
 
-```
+```text
 mediapipe/
-├── weed_detector.py        # メインスクリプト
-├── requirements.txt        # 依存パッケージ
+├── learn.py               # 学習用 CLI
+├── weed_model.py          # 共有特徴量抽出 / モデル入出力
+├── weed_detector.py       # Python 推論 CLI
+├── weed_detector.cpp      # C++ 推論 CLI
+├── requirements.txt       # Python 依存パッケージ
+├── Makefile               # C++ ビルド
 ├── images/
 │   ├── train/
-│   │   ├── weed/           # 雑草画像（学習用）
-│   │   └── not_weed/       # 雑草でない画像（学習用）
-│   └── source/             # 推論対象の画像
-├── model/                  # 学習済みモデルの保存先
-└── output/                 # 検出結果の出力先
+│   │   ├── weed/          # 雑草画像
+│   │   └── not_weed/      # 非雑草画像
+│   └── source/            # 推論対象画像
+├── model/
+│   ├── weed_classifier.yml
+│   └── weed_scaler.yml
+└── output/
 ```
 
 ## セットアップ
@@ -23,65 +33,81 @@ mediapipe/
 pip install -r requirements.txt
 ```
 
-> **注意**: `mediapipe-model-maker` は Python 3.9〜3.11 で動作します。  
-> TensorFlow 2.x が必要です。
+## 学習
 
-## 使い方
+学習画像を以下に配置します。
 
-### 1. 学習データを準備する
+- `images/train/weed/`
+- `images/train/not_weed/`
 
-- `images/train/weed/` に **雑草の画像** を配置
-- `images/train/not_weed/` に **雑草でない画像**（芝生、土、コンクリートなど）を配置
-- 各クラス最低 **10〜20枚**（多いほど精度向上）
-
-### 2. モデルを学習する
+その後、学習を実行します。
 
 ```bash
-python weed_detector.py --train
+python learn.py
 ```
 
-学習済みモデルは `model/` フォルダに `.tflite` として保存されます。
+必要なら出力先を変えられます。
 
-### 3. 推論を実行する
+```bash
+python learn.py --model-path model/custom_classifier.yml --scaler-path model/custom_scaler.yml
+```
 
-`images/source/` に検出対象の画像を配置してから:
+学習後は以下の 2 ファイルが生成されます。
+
+- `model/weed_classifier.yml`
+- `model/weed_scaler.yml`
+
+## Python で推論
+
+静止画推論:
 
 ```bash
 python weed_detector.py --detect
 ```
 
-結果は `output/output_1.jpg`, `output/output_2.jpg`, ... として保存されます。
-
-### 4. 学習→推論を一括実行
+カメラ推論:
 
 ```bash
-python weed_detector.py --all
+python weed_detector.py --camera-detect --config config.txt
 ```
 
-## 出力画像の見方
+## C++ で推論
 
-| 表示内容 | 説明 |
-|---|---|
-| ヘッダー (黄色文字) | 画像分類結果（weed / not_weed）と信頼度 |
-| 緑色バウンディングボックス | 検出された雑草領域 |
-| 半透明の緑マスク | 雑草と判定されたピクセル領域 |
-| 各領域のラベル | 領域番号、幅×高さ(px)、面積(px)、画像全体に対する割合(%) |
-| フッター (黄色文字) | 検出領域数と雑草面積の合計 |
+ビルド:
 
-## パラメータ調整
+```bash
+make
+```
 
-[weed_detector.py](weed_detector.py) 内の設定値を変更できます：
+静止画推論:
 
-| パラメータ | デフォルト値 | 説明 |
-|---|---|---|
-| `EPOCHS` | 10 | 学習エポック数 |
-| `BATCH_SIZE` | 8 | バッチサイズ |
-| `HSV_LOWER` | [25, 40, 40] | 緑色検出の下限 (HSV) |
-| `HSV_UPPER` | [95, 255, 255] | 緑色検出の上限 (HSV) |
-| `MIN_CONTOUR_AREA` | 500 | 最小輪郭面積 (ノイズ除去) |
+```bash
+build/weed_detector_cpp --detect
+```
 
-## トラブルシューティング
+カメラ推論:
 
-- **緑以外の雑草が検出されない**: `HSV_LOWER` / `HSV_UPPER` の値を調整
-- **精度が低い**: 学習画像を各クラス 50枚以上に増やす、`EPOCHS` を増やす
-- **小さい雑草が検出されない**: `MIN_CONTOUR_AREA` を小さくする
+```bash
+build/weed_detector_cpp --camera-detect --config config.txt
+```
+
+## モデルの中身
+
+学習では画像から以下の特徴量を作り、OpenCV SVM に入力しています。
+
+- HSV 3 チャンネルのヒストグラム
+- 緑色画素の割合
+- Sobel エッジ強度の統計量
+
+## 調整ポイント
+
+主な閾値は [weed_model.py](./weed_model.py) にあります。
+
+- `HSV_LOWER`
+- `HSV_UPPER`
+- `MIN_CONTOUR_AREA`
+
+## 補足
+
+- `weed_detector.py` / `weed_detector.cpp` は学習を行いません
+- Python と C++ は同じ `.yml` モデルを読み込みます

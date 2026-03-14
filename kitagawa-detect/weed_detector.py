@@ -1,8 +1,7 @@
 """
-Weed detector using OpenCV and scikit-learn.
+Weed detector using OpenCV.
 
 Supported workflows:
-- Train an SVM classifier from images in images/train.
 - Detect weed regions in still images from images/source.
 - Read camera settings from a config file and print the largest weed position
   in live camera frames.
@@ -10,160 +9,44 @@ Supported workflows:
 
 import argparse
 import csv
-import pickle
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import cv2
-import numpy as np
-from sklearn.model_selection import cross_val_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
-
-
-BASE_DIR = Path(__file__).resolve().parent
-TRAIN_DIR = BASE_DIR / "images" / "train"
-SOURCE_DIR = BASE_DIR / "images" / "source"
-OUTPUT_DIR = BASE_DIR / "output"
-MODEL_DIR = BASE_DIR / "model"
-MODEL_PATH = MODEL_DIR / "weed_classifier.pkl"
-
-IMAGE_SIZE = (128, 128)
-HSV_LOWER = np.array([25, 40, 40])
-HSV_UPPER = np.array([95, 255, 255])
-MIN_CONTOUR_AREA = 500
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-
-
-def extract_features(image_bgr):
-    """Extract features for frame/image level classification."""
-    resized = cv2.resize(image_bgr, IMAGE_SIZE)
-    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
-
-    hist_features = []
-    for ch in range(3):
-        hist = cv2.calcHist([hsv], [ch], None, [32], [0, 256])
-        hist = cv2.normalize(hist, hist).flatten()
-        hist_features.append(hist)
-    color_feat = np.concatenate(hist_features)
-
-    mask = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
-    green_ratio = np.sum(mask > 0) / mask.size
-
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    mag = np.sqrt(sobelx**2 + sobely**2)
-    texture_feat = np.array(
-        [
-            mag.mean(),
-            mag.std(),
-            mag.max(),
-            np.sum(mag > mag.mean()) / mag.size,
-        ]
-    )
-
-    return np.concatenate([color_feat, [green_ratio], texture_feat])
-
-
-def _get_image_paths(directory):
-    """Return image files in a directory."""
-    if not directory.exists():
-        return []
-
-    paths = []
-    for path in sorted(directory.iterdir()):
-        if path.suffix.lower() in IMAGE_EXTENSIONS:
-            paths.append(path)
-    return paths
-
-
-def train_model():
-    """Train the classifier from images/train and save it to model/."""
-    print("=" * 60)
-    print("Training model")
-    print("=" * 60)
-
-    weed_dir = TRAIN_DIR / "weed"
-    not_weed_dir = TRAIN_DIR / "not_weed"
-
-    weed_images = _get_image_paths(weed_dir)
-    not_weed_images = _get_image_paths(not_weed_dir)
-
-    print(f"Weed images: {len(weed_images)} ({weed_dir})")
-    print(f"Not-weed images: {len(not_weed_images)} ({not_weed_dir})")
-
-    if not weed_images or not not_weed_images:
-        print("[ERROR] Training images are missing.")
-        print("Place weed images under images/train/weed/")
-        print("Place non-weed images under images/train/not_weed/")
-        sys.exit(1)
-
-    print("\nExtracting features...")
-    features = []
-    labels = []
-
-    for path in weed_images:
-        image_bgr = cv2.imread(str(path))
-        if image_bgr is None:
-            continue
-        features.append(extract_features(image_bgr))
-        labels.append(1)
-
-    for path in not_weed_images:
-        image_bgr = cv2.imread(str(path))
-        if image_bgr is None:
-            continue
-        features.append(extract_features(image_bgr))
-        labels.append(0)
-
-    if not features:
-        print("[ERROR] No training images could be read.")
-        sys.exit(1)
-
-    X = np.array(features)
-    y = np.array(labels)
-    print(f"Feature matrix: {X.shape[0]} samples x {X.shape[1]} dims")
-
-    pipeline = Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("svm", SVC(kernel="rbf", probability=True, C=10, gamma="scale")),
-        ]
-    )
-
-    _, class_counts = np.unique(y, return_counts=True)
-    n_splits = min(5, int(class_counts.min())) if len(class_counts) >= 2 else 0
-    if n_splits >= 2:
-        scores = cross_val_score(pipeline, X, y, cv=n_splits, scoring="accuracy")
-        print(
-            f"Cross-validation accuracy: {scores.mean():.2%} "
-            f"(+/- {scores.std():.2%})"
-        )
-
-    print("Fitting final model...")
-    pipeline.fit(X, y)
-
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    with MODEL_PATH.open("wb") as model_file:
-        pickle.dump(pipeline, model_file)
-
-    print(f"Saved model to: {MODEL_PATH}")
-    print("=" * 60)
+from weed_model import (
+    HSV_LOWER,
+    HSV_UPPER,
+    LABEL_MAP,
+    MIN_CONTOUR_AREA,
+    MODEL_PATH,
+    OUTPUT_DIR,
+    SCALER_PATH,
+    SOURCE_DIR,
+    WeedClassifier,
+    extract_features,
+    get_image_paths,
+)
 
 
 def load_classifier():
     """Load the saved classifier."""
     if not MODEL_PATH.exists():
         print(f"[ERROR] Model file not found: {MODEL_PATH}")
-        print("Run with --train first.")
+        print("Run python learn.py first.")
+        sys.exit(1)
+    if not SCALER_PATH.exists():
+        print(f"[ERROR] Scaler file not found: {SCALER_PATH}")
+        print("Run python learn.py first.")
         sys.exit(1)
 
     print(f"Loading model: {MODEL_PATH}")
-    with MODEL_PATH.open("rb") as model_file:
-        return pickle.load(model_file)
+    print(f"Loading scaler: {SCALER_PATH}")
+    try:
+        return WeedClassifier().load(MODEL_PATH, SCALER_PATH)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
 
 def _contour_center(contour, bbox):
@@ -304,7 +187,7 @@ def process_source_images():
     print("Processing source images")
     print("=" * 60)
 
-    source_files = _get_image_paths(SOURCE_DIR)
+    source_files = get_image_paths(SOURCE_DIR)
     if not source_files:
         print(f"[ERROR] No source images found in: {SOURCE_DIR}")
         sys.exit(1)
@@ -315,7 +198,6 @@ def process_source_images():
     output_csv_path = OUTPUT_DIR / "detections.csv"
 
     classifier = load_classifier()
-    label_map = {0: "not_weed", 1: "weed"}
     csv_rows = []
 
     for index, img_path in enumerate(source_files, start=1):
@@ -325,11 +207,9 @@ def process_source_images():
             print("  -> failed to read image")
             continue
 
-        feat = extract_features(image_bgr).reshape(1, -1)
-        pred = classifier.predict(feat)[0]
-        proba = classifier.predict_proba(feat)[0]
-        score = proba[pred]
-        label = label_map.get(pred, "unknown")
+        feat = extract_features(image_bgr)
+        pred, score = classifier.predict_with_confidence(feat)
+        label = LABEL_MAP.get(pred, "unknown")
 
         print(f"  Classification: {label} (confidence: {score:.2%})")
 
@@ -515,19 +395,9 @@ def build_arg_parser():
     """Build the command line parser."""
     parser = argparse.ArgumentParser(description="Weed detector")
     parser.add_argument(
-        "--train",
-        action="store_true",
-        help="train the classifier from images/train/",
-    )
-    parser.add_argument(
         "--detect",
         action="store_true",
         help="process still images from images/source/",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="run --train and --detect in sequence",
     )
     parser.add_argument(
         "--camera-detect",
@@ -547,20 +417,15 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    if not any([args.train, args.detect, args.all, args.camera_detect]):
+    if not any([args.detect, args.camera_detect]):
         print("Examples:")
-        print("  python weed_detector.py --train")
         print("  python weed_detector.py --detect")
-        print("  python weed_detector.py --all")
         print("  python weed_detector.py --camera-detect --config config.txt")
         print()
         parser.print_help()
         sys.exit(0)
 
-    if args.train or args.all:
-        train_model()
-
-    if args.detect or args.all:
+    if args.detect:
         process_source_images()
 
     if args.camera_detect:
